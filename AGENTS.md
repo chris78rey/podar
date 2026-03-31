@@ -15,6 +15,14 @@
 - Prune run (copy): add credentials and remove `--dry-run` to execute copies.
  - With generation filter: append `--dig-id-generacion 12345` (optionally combine with `--expediente CEX02`).
 
+## Quick Install on New Machine
+- Setup venv: `python -m venv venv && source venv/bin/activate`.
+- Install deps: `pip install -r requirements.txt`.
+- Copy JDBC: place `ojdbc8.jar` under `jdbc/` and set `ORACLE_JDBC_JAR` in `.env`.
+- Configure env: `cp .env.example .env` and edit credentials and targets.
+- Validate env: `python scripts/check_env.py` (checks Python, Java, packages, JAR, vars).
+- Optional GUI: `python scripts/gui_launcher.py` to run prune with a simple UI.
+
 ## Coding Style & Naming
 - Language: Python 3.11+.
 - Style: PEP 8; 4-space indentation; descriptive function/variable names in `snake_case`.
