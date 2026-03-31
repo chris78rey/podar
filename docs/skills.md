@@ -11,12 +11,14 @@
 - Entrada: `--source-base`, `--dest-base`, `--fe-pla-aniomes`, opcionales `--expediente`, `--dig-id-generacion`, `--limit`.
 - Salida: Resumen por estado y CSV de manifiesto.
 - Comando: `python scripts/prune_local_mirror_from_oracle.py --source-base /ruta/src --dest-base /ruta/dest --fe-pla-aniomes 202602 --dry-run --limit 25`
+- Variante con generación: añadir `--dig-id-generacion 12345` (opcional combinar `--expediente CEX02`).
 
 ## Poda efectiva de espejo
 - Objetivo: Copiar subárboles válidos al destino.
 - Entrada: Igual a la simulada, sin `--dry-run`.
 - Salida: Archivos copiados y manifiesto CSV.
 - Comando: `python scripts/prune_local_mirror_from_oracle.py --source-base /ruta/src --dest-base /ruta/dest --fe-pla-aniomes 202602`
+- Variante con generación: añadir `--dig-id-generacion 12345`.
 
 ## Validación de entorno
 - Objetivo: Verificar Python, dependencias y jar JDBC.
