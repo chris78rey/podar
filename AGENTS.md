@@ -13,6 +13,7 @@
 - Oracle test: `python scripts/test_oracle.py` — verifies JDBC connectivity using `.env`.
 - Prune run (dry): `python scripts/prune_local_mirror_from_oracle.py --source-base /path/src --dest-base /path/dest --fe-pla-aniomes 202602 --dry-run`.
 - Prune run (copy): add credentials and remove `--dry-run` to execute copies.
+ - With generation filter: append `--dig-id-generacion 12345` (optionally combine with `--expediente CEX02`).
 
 ## Coding Style & Naming
 - Language: Python 3.11+.
