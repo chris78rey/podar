@@ -16,14 +16,35 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import os
 import shutil
 import sys
 import traceback
+from zipfile import ZIP_DEFLATED, ZipFile
 from dataclasses import dataclass
 from pathlib import Path
 
 import jaydebeapi
+
+try:
+    from .oracle_defaults import (
+        DEFAULT_ORACLE_JDBC_JAR,
+        DEFAULT_ORACLE_OWNER,
+        DEFAULT_ORACLE_SOURCE_TABLE,
+        DEFAULT_ORACLE_TARGETS,
+        DEFAULT_ORACLE_USER,
+    )
+    from .jvm_utils import app_root, resolve_app_path, start_jvm
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from oracle_defaults import (
+        DEFAULT_ORACLE_JDBC_JAR,
+        DEFAULT_ORACLE_OWNER,
+        DEFAULT_ORACLE_SOURCE_TABLE,
+        DEFAULT_ORACLE_TARGETS,
+        DEFAULT_ORACLE_USER,
+    )
+    from jvm_utils import app_root, resolve_app_path, start_jvm
 
 
 # =========================================================
@@ -45,6 +66,12 @@ def load_dotenv(path: Path) -> None:
                 os.environ[key] = value
     except OSError:
         return
+
+
+def _mask_secret(value: str | None) -> str:
+    if not value:
+        return "<vacia>"
+    return f"<cargada:{len(value)} chars>"
 
 
 def parse_target(value: str) -> tuple[str, int, str]:
@@ -79,10 +106,12 @@ def connect_with_failover(
     password: str,
     targets: list[tuple[str, int, str]],
 ):
+    start_jvm([str(jar)])
     last_exc: BaseException | None = None
 
     for host, port, sid in targets:
         url = jdbc_url(host, port, sid)
+        print(f"Probando {url} con usuario={user} y clave={_mask_secret(password)}...")
         try:
             conn = jaydebeapi.connect(
                 driver,
@@ -92,10 +121,13 @@ def connect_with_failover(
             )
             return conn, (host, port, sid)
         except BaseException as exc:
+            print(f"Fallo en {host}:{port}:{sid} ({type(exc).__name__}): {exc}")
             last_exc = exc
             continue
 
-    raise RuntimeError("No se pudo conectar a ningún target Oracle") from last_exc
+    if last_exc is not None:
+        raise RuntimeError(f"No se pudo conectar a ningún target Oracle. Ultimo error: {type(last_exc).__name__}: {last_exc}") from last_exc
+    raise RuntimeError("No se pudo conectar a ningún target Oracle")
 
 
 # =========================================================
@@ -132,7 +164,6 @@ def fetch_tramites(
     table: str,
     dig_planillado: str,
     fe_pla_aniomes: str,
-    expediente: str | None,
     id_generacion: str | None,
     limit: int,
 ) -> list[TramiteRow]:
@@ -141,10 +172,6 @@ def fetch_tramites(
         "TRIM(FE_PLA_ANIOMES) = TRIM(?)",
     ]
     params: list[object] = [dig_planillado, fe_pla_aniomes]
-
-    if expediente:
-        where.append("TRIM(DIG_EXPEDIENTE) = TRIM(?)")
-        params.append(expediente)
 
     if id_generacion:
         where.append("TO_CHAR(DIG_ID_GENERACION) = TO_CHAR(?)")
@@ -221,7 +248,7 @@ def build_source_path(source_base: Path, row: TramiteRow) -> Path:
 
 
 def build_dest_path(dest_base: Path, row: TramiteRow) -> Path:
-    return dest_base / row.dig_anio / row.dig_expediente / row.dig_tramite
+    return dest_base / row.dig_tramite
 
 
 def count_files(folder: Path) -> int:
@@ -233,6 +260,36 @@ def count_files(folder: Path) -> int:
     except OSError:
         return total
     return total
+
+
+def list_pdfs(folder: Path) -> list[Path]:
+    pdfs: list[Path] = []
+    try:
+        for item in folder.rglob("*"):
+            if item.is_file() and item.suffix.lower() == ".pdf":
+                pdfs.append(item)
+    except OSError:
+        return pdfs
+    return pdfs
+
+
+def flattened_pdf_name(src: Path) -> str:
+    return src.name
+
+
+def unique_dest_path(folder: Path, filename: str) -> Path:
+    candidate = folder / filename
+    if not candidate.exists():
+        return candidate
+
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    index = 2
+    while True:
+        alt = folder / f"{stem}_{index}{suffix}"
+        if not alt.exists():
+            return alt
+        index += 1
 
 
 def copy_tramite_tree(
@@ -266,13 +323,27 @@ def copy_tramite_tree(
         return result
 
     result["files_found"] = count_files(src)
+    pdfs = list_pdfs(src)
+    result["pdfs_found"] = len(pdfs)
 
-    if dry_run:
-        result["status"] = "WOULD_COPY"
+    if not pdfs:
+        result["pdfs_copied"] = 0
+        result["status"] = "NO_PDFS" if not dry_run else "WOULD_SKIP_NO_PDFS"
         return result
 
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dst, dirs_exist_ok=True, copy_function=shutil.copy2)
+    if dry_run:
+        result["status"] = "WOULD_FLATTEN_PDFS"
+        return result
+
+    dst.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for pdf in pdfs:
+        rel_name = flattened_pdf_name(pdf)
+        target = unique_dest_path(dst, rel_name)
+        shutil.copy2(pdf, target)
+        copied += 1
+
+    result["pdfs_copied"] = copied
     result["status"] = "COPIED"
     return result
 
@@ -292,11 +363,155 @@ def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
                 "dest_path",
                 "status",
                 "files_found",
+                "pdfs_found",
+                "pdfs_copied",
             ],
         )
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _xml_escape(value: object) -> str:
+    text = "" if value is None else str(value)
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _excel_col_name(index: int) -> str:
+    name = ""
+    while index:
+        index, rem = divmod(index - 1, 26)
+        name = chr(65 + rem) + name
+    return name
+
+
+def _worksheet_xml(rows: list[list[object]]) -> str:
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+        "<sheetData>",
+    ]
+    for row_idx, row in enumerate(rows, start=1):
+        parts.append(f'<row r="{row_idx}">')
+        for col_idx, value in enumerate(row, start=1):
+            ref = f"{_excel_col_name(col_idx)}{row_idx}"
+            if isinstance(value, bool):
+                parts.append(f'<c r="{ref}" t="inlineStr"><is><t>{_xml_escape(value)}</t></is></c>')
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                parts.append(f'<c r="{ref}" t="n"><v>{value}</v></c>')
+            else:
+                parts.append(f'<c r="{ref}" t="inlineStr"><is><t>{_xml_escape(value)}</t></is></c>')
+        parts.append("</row>")
+    parts.append("</sheetData></worksheet>")
+    return "".join(parts)
+
+
+def write_excel_report(path: Path, summary: dict[str, object], detail_rows: list[dict[str, object]]) -> None:
+    summary_rows = [["Campo", "Valor"]]
+    for key, value in summary.items():
+        summary_rows.append([key, value])
+
+    expediente_totals: dict[str, dict[str, object]] = {}
+    for row in detail_rows:
+        expediente = str(row.get("dig_expediente", ""))
+        bucket = expediente_totals.setdefault(
+            expediente,
+            {
+                "dig_expediente": expediente,
+                "tramites": 0,
+                "pdfs_found": 0,
+                "pdfs_copied": 0,
+            },
+        )
+        bucket["tramites"] = int(bucket["tramites"]) + 1
+        bucket["pdfs_found"] = int(bucket["pdfs_found"]) + int(row.get("pdfs_found", 0) or 0)
+        bucket["pdfs_copied"] = int(bucket["pdfs_copied"]) + int(row.get("pdfs_copied", 0) or 0)
+
+    detail_headers = [
+        "dig_id",
+        "dig_expediente",
+        "dig_tramite",
+        "fe_pla_aniomes",
+        "dig_anio",
+        "source_path",
+        "dest_path",
+        "status",
+        "files_found",
+        "pdfs_found",
+        "pdfs_copied",
+    ]
+    detail_table = [detail_headers]
+    for row in detail_rows:
+        detail_table.append([row.get(h, "") for h in detail_headers])
+
+    expediente_headers = ["dig_expediente", "tramites", "pdfs_found", "pdfs_copied"]
+    expediente_table = [expediente_headers]
+    for expediente, bucket in sorted(
+        expediente_totals.items(),
+        key=lambda item: (-int(item[1]["tramites"]), item[0]),
+    ):
+        expediente_table.append([bucket.get(h, "") for h in expediente_headers])
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>
+"""
+    root_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>
+"""
+    workbook_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Resumen" sheetId="1" r:id="rId1"/>
+    <sheet name="Detalle" sheetId="2" r:id="rId2"/>
+    <sheet name="Expedientes" sheetId="3" r:id="rId3"/>
+  </sheets>
+</workbook>
+"""
+    workbook_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>
+"""
+    styles_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border/></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+</styleSheet>
+"""
+
+    with ZipFile(path, "w", compression=ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", root_rels)
+        zf.writestr("xl/workbook.xml", workbook_xml)
+        zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        zf.writestr("xl/styles.xml", styles_xml)
+        zf.writestr("xl/worksheets/sheet1.xml", _worksheet_xml(summary_rows))
+        zf.writestr("xl/worksheets/sheet2.xml", _worksheet_xml(detail_table))
+        zf.writestr("xl/worksheets/sheet3.xml", _worksheet_xml(expediente_table))
 
 
 # =========================================================
@@ -309,7 +524,7 @@ def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
 # =========================================================
 
 def main(argv: list[str]) -> int:
-    load_dotenv(Path(".env"))
+    load_dotenv(app_root() / ".env")
 
     parser = argparse.ArgumentParser(
         description="Genera una copia podada local desde un espejo SFTP, filtrando por Oracle."
@@ -318,31 +533,45 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--dest-base", required=True, help="Destino para la copia podada. Ej: /mnt/podado_202602")
     parser.add_argument("--fe-pla-aniomes", required=True, help="Periodo YYYYMM. Ej: 202602")
     parser.add_argument("--dig-planillado", default="S", help="Valor de DIG_PLANILLADO. Default: S")
-    parser.add_argument("--expediente", default="", help="Filtro opcional de expediente. Ej: CEX02")
-    parser.add_argument("--dig-id-generacion", default="", help="Filtro opcional por DIG_ID_GENERACION")
+    parser.add_argument("--dig-id-generacion", required=True, help="Filtro por DIG_ID_GENERACION")
+    parser.add_argument(
+        "--numero-tramite-issfa",
+        "--carpeta-salida",
+        "--output-folder",
+        dest="output_folder_name",
+        default="",
+        help="Nombre de la carpeta de salida. Si se omite, usa el ID de generacion",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Limitar cantidad de trámites (0=todos)")
     parser.add_argument("--dry-run", action="store_true", help="Solo diagnostica, no copia")
     parser.add_argument("--manifest-csv", default="", help="Ruta del manifiesto CSV")
-    parser.add_argument("--jar", default=os.environ.get("ORACLE_JDBC_JAR", "jdbc/ojdbc8 copy.jar"))
-    parser.add_argument("--user", default=os.environ.get("ORACLE_USER", "DIGITALIZACION"))
+    parser.add_argument("--jar", default=os.environ.get("ORACLE_JDBC_JAR", DEFAULT_ORACLE_JDBC_JAR))
+    parser.add_argument("--user", default=os.environ.get("ORACLE_USER", DEFAULT_ORACLE_USER))
     parser.add_argument("--password", default=os.environ.get("ORACLE_PASSWORD", ""))
-    parser.add_argument("--targets", default=os.environ.get("ORACLE_TARGETS", ""))
-    parser.add_argument("--owner", default=os.environ.get("ORACLE_OWNER", "DIGITALIZACION"))
-    parser.add_argument("--source-table", default=os.environ.get("ORACLE_SOURCE_TABLE", "DIGITALIZACION"))
+    parser.add_argument("--targets", default=os.environ.get("ORACLE_TARGETS", DEFAULT_ORACLE_TARGETS))
+    parser.add_argument("--owner", default=os.environ.get("ORACLE_OWNER", DEFAULT_ORACLE_OWNER))
+    parser.add_argument("--source-table", default=os.environ.get("ORACLE_SOURCE_TABLE", DEFAULT_ORACLE_SOURCE_TABLE))
     args = parser.parse_args(argv)
 
     source_base = safe_resolve(Path(args.source_base))
     dest_base = safe_resolve(Path(args.dest_base))
+    generation_id = str(args.dig_id_generacion).strip()
+    if not generation_id:
+        print("ERROR: falta DIG_ID_GENERACION", file=sys.stderr)
+        return 2
 
-    if source_base == dest_base:
-        print("ERROR: --source-base y --dest-base no pueden ser la misma ruta", file=sys.stderr)
+    output_folder_name = str(args.output_folder_name).strip() or generation_id
+    final_dest_base = dest_base / output_folder_name
+
+    if source_base == final_dest_base:
+        print("ERROR: --source-base y el destino final no pueden ser la misma ruta", file=sys.stderr)
         return 2
 
     if not source_base.exists() or not source_base.is_dir():
         print(f"ERROR: source-base inválido: {source_base}", file=sys.stderr)
         return 2
 
-    jar = safe_resolve(Path(args.jar))
+    jar = resolve_app_path(args.jar)
     if not jar.exists():
         print(f"ERROR: no existe el JDBC jar: {jar}", file=sys.stderr)
         return 2
@@ -359,11 +588,19 @@ def main(argv: list[str]) -> int:
     targets = [parse_target(x) for x in raw_targets]
     driver = "oracle.jdbc.OracleDriver"
 
+    print(f"Archivo .env: {resolve_app_path('.env')}")
+    print(f"JDBC jar: {jar}")
+    print(f"Usuario Oracle: {args.user}")
+    print(f"Clave Oracle: {_mask_secret(args.password)}")
+    print(f"Targets Oracle: {args.targets}")
+    print(f"Target count: {len(targets)}")
+
     manifest_csv = (
         safe_resolve(Path(args.manifest_csv))
         if str(args.manifest_csv).strip()
-        else dest_base.parent / f"{dest_base.name}_manifest.csv"
+        else dest_base / f"{output_folder_name}_manifest.csv"
     )
+    report_xlsx = dest_base / f"{output_folder_name}_detalle.xlsx"
 
     conn = None
     try:
@@ -382,8 +619,7 @@ def main(argv: list[str]) -> int:
             table=args.source_table,
             dig_planillado=args.dig_planillado,
             fe_pla_aniomes=args.fe_pla_aniomes,
-            expediente=(args.expediente or "").strip() or None,
-            id_generacion=(args.dig_id_generacion or "").strip() or None,
+            id_generacion=generation_id,
             limit=int(args.limit or 0),
         )
 
@@ -392,35 +628,58 @@ def main(argv: list[str]) -> int:
             return 0
 
         if not args.dry_run:
-            dest_base.mkdir(parents=True, exist_ok=True)
+            final_dest_base.mkdir(parents=True, exist_ok=True)
 
         results: list[dict[str, object]] = []
         copied = 0
         missing = 0
         invalid = 0
+        no_pdfs = 0
 
         for row in tramites:
             result = copy_tramite_tree(
                 source_base=source_base,
-                dest_base=dest_base,
+                dest_base=final_dest_base,
                 row=row,
                 dry_run=args.dry_run,
             )
             results.append(result)
 
             status = str(result["status"])
-            if status in {"COPIED", "WOULD_COPY"}:
+            if status == "COPIED" or status.startswith("WOULD_"):
                 copied += 1
             elif status == "MISSING_SOURCE":
                 missing += 1
+            elif status in {"NO_PDFS", "WOULD_SKIP_NO_PDFS"}:
+                no_pdfs += 1
             else:
                 invalid += 1
 
         write_manifest(manifest_csv, results)
+        write_excel_report(
+            report_xlsx,
+            summary={
+                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                "generation_id": generation_id,
+                "output_folder_name": output_folder_name,
+                "periodo": args.fe_pla_aniomes,
+                "planillado": args.dig_planillado,
+                "source_base": str(source_base),
+                "dest_base": str(final_dest_base),
+                "tramites": len(tramites),
+                "ok": copied,
+                "missing": missing,
+                "no_pdfs": no_pdfs,
+                "invalid": invalid,
+                "manifest_csv": str(manifest_csv),
+            },
+            detail_rows=results,
+        )
 
         print("========================================")
         print(f"source_base : {source_base}")
-        print(f"dest_base   : {dest_base}")
+        print(f"dest_base   : {final_dest_base}")
+        print(f"generation  : {generation_id}")
         print(f"periodo     : {args.fe_pla_aniomes}")
         print(f"planillado  : {args.dig_planillado}")
         print(f"tramites    : {len(tramites)}")
@@ -428,6 +687,7 @@ def main(argv: list[str]) -> int:
         print(f"missing     : {missing}")
         print(f"invalid     : {invalid}")
         print(f"manifest    : {manifest_csv}")
+        print(f"report_xlsx : {report_xlsx}")
         print("========================================")
 
         return 0
