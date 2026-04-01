@@ -1,0 +1,4 @@
+display_name: PODA Memory
+short_description: Remember the current PODA project context
+default_prompt: Use this skill when working on the PODA Oracle pruning repo and you need the current output layout, report format, GUI launcher, Oracle defaults, or PDF flattening rules.
+

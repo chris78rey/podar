@@ -49,6 +49,11 @@ def resolve_jvm_path() -> str:
             if candidate.is_file():
                 return str(candidate)
 
+    bundled_jre = app_root() / "jre"
+    for candidate in _candidate_jvm_paths(bundled_jre):
+        if candidate.is_file():
+            return str(candidate)
+
     java_home = os.environ.get("JAVA_HOME")
     if java_home:
         base = Path(java_home).expanduser()

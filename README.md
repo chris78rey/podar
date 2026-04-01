@@ -22,6 +22,7 @@ Este proyecto genera una copia podada de un repositorio documental local usando 
 - Ejecutable portable: `dist\PODA\PODA.exe`
 - Instalador generado: `installer_output\PODA_Setup.exe`
 - El instalador copia la app y deja el launcher listo en el menu Inicio y el escritorio opcional
+- El instalador incluye un runtime Java portable generado con `jlink`, por lo que no depende del Java del sistema para conectar a Oracle
 - El instalador crea `%APPDATA%\PODA\.env` con los valores visibles y deja la clave vacia
 - La app busca `.env` en `%APPDATA%\PODA\.env`, junto al ejecutable instalado, o en desarrollo en la raiz del repo
 - La GUI muestra `ORACLE_USER`, `ORACLE_TARGETS`, `ORACLE_JDBC_JAR`, `ORACLE_OWNER` y `ORACLE_SOURCE_TABLE` con valores visibles; solo la clave se mantiene oculta

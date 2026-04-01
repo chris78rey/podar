@@ -1,0 +1,4 @@
+display_name: PODA Packaging
+short_description: Bundle and debug the PODA Windows installer
+default_prompt: Use this skill when building, packaging, or troubleshooting the PODA Windows distributable. Focus on bundled JRE, Oracle connectivity, .env placement, and portability on machines without system Java.
+

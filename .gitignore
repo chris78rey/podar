@@ -2,3 +2,9 @@
 venv/
 __pycache__/
 *.pyc
+build/
+dist/
+installer_output/
+PODA.spec
+run_*.out.txt
+run_*.err.txt

@@ -1,0 +1,4 @@
+display_name: PODA Operacion
+short_description: Quick end-user instructions for PODA
+default_prompt: Use this skill when the user needs concise operating instructions for PODA. Focus on the GUI, the two main input fields, saving Oracle config, testing Oracle, and running the download.
+
