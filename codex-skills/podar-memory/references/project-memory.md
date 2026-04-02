@@ -52,6 +52,22 @@
 - The GUI has a `Guardar config` action that writes Oracle settings back to `%APPDATA%\PODA\.env`, so `ORACLE_TARGETS` can be updated without reinstalling.
 - Packaged builds include a bundled `jre` generated with `jlink` so the app does not rely on system Java on the target machine.
 
+## OrganizaPlanillas
+
+- New Excel-driven organizer: `scripts/organiza_planillas.py`
+- GUI: `scripts/organiza_planillas_app.py`
+- Launchers: `run_organiza_planillas.ps1` and `run_organiza_planillas.bat`
+- Build: `build_organiza_planillas.ps1`
+- Input Excel columns: `dig_id`, `dig_anio`, `dig_expediente`, `dig_id_tramite`, `dig_tramite`
+- Output layout: `dest-base/dig_anio/dig_expediente[/dig_id_tramite]/dig_tramite`
+- `dig_id_tramite` is optional in the output when the user selects omit mode or the cell is blank
+- The app reads source folders locally, flattens PDFs into the final tramite folder, and generates CSV + Excel reports
+- Excel parsing uses `openpyxl`
+- The GUI can process the full Excel or filter down to a single `dig_id_tramite`
+- If one `dig_id_tramite` appears in multiple expedientes, use the highest expediente number for the destination path across all rows of that `dig_id_tramite`
+- Installer build: `build_organiza_planillas_installer.ps1`
+- Installer definition: `installer/OrganizaPlanillas.iss`
+
 ## Current Example Paths
 
 - Source mirror example: `C:\Users\Administrador\Desktop\leti`
@@ -63,4 +79,3 @@
 - The project has been validated with direct Oracle connectivity.
 - The current workflow uses `DIG_ID_GENERACION` as the Oracle filter and a separate ISSFA tramite number for the output folder, not expediente-first.
 - If the workflow changes, update this file immediately.
-
